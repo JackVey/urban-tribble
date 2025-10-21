@@ -10,19 +10,53 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Download VPN Gate List
+    - name: Download VPN Gate List (with retry & timeout)
       run: |
-        curl -s "http://103.52.146.108/api/iphone/" -o servers.csv
-        curl -s "https://api.vpngate.net/api/iphone/" -o servers-backup.csv
+        # تابع retry برای curl
+        retry_curl() {
+          local url=$1
+          local output=$2
+          local max_retries=3
+          local retry=1
+          while [ $retry -le $max_retries ]; do
+            echo "Attempt $retry/$max_retries for $url"
+            if curl -s --connect-timeout 30 --max-time 60 "$url" -o "$output"; then
+              if [ -s "$output" ] && grep -q "vpn" "$output"; then  # چک کن فایل خالی نباشه و محتوای VPN داشته باشه
+                echo "✅ Downloaded successfully!"
+                return 0
+              else
+                echo "⚠️ File empty or invalid, retrying..."
+              fi
+            fi
+            retry=$((retry + 1))
+            sleep $((retry * 5))  # backoff: 5s, 10s, 15s
+          done
+          echo "❌ All retries failed for $url"
+          return 1
+        }
         
-    - name: Convert to TXT (SoftEther Format)
-      run: |
-        awk -F',' 'NR>1 {print $1","$2","$3","$7","$9","$10","$11","$12}' servers.csv > vpngate.txt
+        # دانلود از آدرس‌های مختلف (اول mirrorهای GitHub، بعد اصلی)
+        retry_curl "https://raw.githubusercontent.com/StreetHackerVPN/vpngate-relay/main/vpngate.txt" "servers.txt" || \
+        retry_curl "https://raw.githubusercontent.com/Watfaq/vpngate-mirror/main/servers.txt" "servers.txt" || \
+        retry_curl "https://api.vpngate.net/api/iphone/" "servers.csv" || \
+        retry_curl "http://103.52.146.108/api/iphone/" "servers-backup.csv"
+        
+        # اگر CSV دانلود شد، به TXT تبدیل کن
+        if [ -f "servers.csv" ] && [ -s "servers.csv" ]; then
+          awk -F',' 'NR>1 {print $1","$2","$3","$7","$9","$10","$11","$12}' servers.csv > vpngate.txt
+        elif [ -f "servers.txt" ] && [ -s "servers.txt" ]; then
+          cp servers.txt vpngate.txt
+        else
+          echo "❌ No valid file downloaded!"
+          exit 1
+        fi
+        
+        echo "📊 Servers count: $(wc -l < vpngate.txt)"
         
     - name: Commit & Push
       run: |
         git config user.name "GitHub Action"
         git config user.email "action@github.com"
-        git add servers.csv vpngate.txt
+        git add servers.* vpngate.txt
         git commit -m "Update VPN Gate servers $(date)"
         git push
